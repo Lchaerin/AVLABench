@@ -51,7 +51,7 @@ def save_single_data(data:Dict, save_dir:str, filename:str, data_name:str=None):
     obs_group = data_group.create_group("observation")
     info_group = data_group.create_group("meta_info")
     for key, buffer in data.items():
-        if key in ["trajectory"]:
+        if key in ["trajectory", "action", "binaural_audio"]:
             buffer = np.array(buffer, dtype=np.float32)
             data_group.create_dataset(key, data=buffer, compression='gzip', compression_opts=9)
         elif isinstance(buffer, list) and isinstance(buffer[0], str):
@@ -65,10 +65,20 @@ def save_single_data(data:Dict, save_dir:str, filename:str, data_name:str=None):
             info_group.create_dataset(key, data=np.array(buffer).astype("S"))
         elif key in ["masked_point_cloud", "grasped_obj_name", "extrinsic", "instrinsic", "segmentation"]:
             continue
-        else: # observation saving 
+        else:  # observation saving
             try:
-                buffer = np.array(buffer, dtype=np.float32) if key != "rgb" else np.array(buffer, dtype=np.uint8)
-                obs_group.create_dataset(key, data=buffer, compression='gzip', compression_opts=9)
+                if key == "rgb":
+                    arr = np.array(buffer, dtype=np.uint8)   # [T, n_cams, H, W, 3]
+                    obs_group.create_dataset(key, data=arr, compression='gzip', compression_opts=9)
+                    # also split per-camera for LeRobot compatibility
+                    for cam_i in range(arr.shape[1]):
+                        obs_group.create_dataset(
+                            f"image_{cam_i}", data=arr[:, cam_i],
+                            compression='gzip', compression_opts=9
+                        )
+                else:
+                    buffer = np.array(buffer, dtype=np.float32)
+                    obs_group.create_dataset(key, data=buffer, compression='gzip', compression_opts=9)
             except Exception as e:
                 print(f"Error in saving {key}: {e}")
     hdf5_file.close()

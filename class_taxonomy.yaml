@@ -1,0 +1,354 @@
+# BiSELD 압축 클래스 분류 — 머신러닝 사용용 YAML
+# FSD50K (200) + MRSLife (9) = 209개 → 38개로 압축
+# 사용: LABEL_MAP[original_fsd50k_label] → compressed_class_id (0~37)
+
+n_classes: 38
+
+classes:
+  0:  {name: Speech,               name_ko: "음성/대화"}
+  1:  {name: Shout_Scream,         name_ko: "고함/비명"}
+  2:  {name: Laughter,             name_ko: "웃음"}
+  3:  {name: Cry_Sob,              name_ko: "울음/흐느낌"}
+  4:  {name: Human_Breath_Bodily,  name_ko: "호흡·신체음"}
+  5:  {name: Footsteps_Walk_Run,   name_ko: "발소리/걸음/뛰기"}
+  6:  {name: Clap_Snap,            name_ko: "박수/손가락 튕기기"}
+  7:  {name: Singing_Vocal,        name_ko: "노래/보컬/허밍"}
+  8:  {name: Piano_Keys,           name_ko: "피아노·오르간·건반"}
+  9:  {name: Guitar_Plucked,       name_ko: "기타·우쿨렐레"}
+  10: {name: String_Bowed,         name_ko: "바이올린·첼로·현악"}
+  11: {name: Wind_Brass,           name_ko: "관악기"}
+  12: {name: Drums_Percussion,     name_ko: "드럼·타악기"}
+  13: {name: Electronic_Synth,     name_ko: "전자음악·신시사이저"}
+  14: {name: Dog,                  name_ko: "개"}
+  15: {name: Cat,                  name_ko: "고양이"}
+  16: {name: Bird,                 name_ko: "새"}
+  17: {name: Insect,               name_ko: "곤충"}
+  18: {name: Other_Animal,         name_ko: "기타 동물"}
+  19: {name: Car_Automobile,       name_ko: "승용차·소형 차량"}
+  20: {name: Motorcycle,           name_ko: "오토바이"}
+  21: {name: Truck_Bus,            name_ko: "트럭·버스"}
+  22: {name: Train_Rail,           name_ko: "기차·지하철"}
+  23: {name: Aircraft,             name_ko: "비행기·헬리콥터"}
+  24: {name: Boat_Ship,            name_ko: "배·보트"}
+  25: {name: Rain,                 name_ko: "비"}
+  26: {name: Thunder_Storm,        name_ko: "천둥·폭풍"}
+  27: {name: Wind_Rustling,        name_ko: "바람·나뭇잎"}
+  28: {name: Water_Flow,           name_ko: "물(강·폭포·파도)"}
+  29: {name: Fire_Crackle,         name_ko: "불·폭발"}
+  30: {name: Door_Window,          name_ko: "문·창문"}
+  31: {name: Phone_Notification,   name_ko: "전화·알림음"}
+  32: {name: Alarm_Siren,          name_ko: "경보·사이렌"}
+  33: {name: Keyboard_Typing_Mouse, name_ko: "키보드·타이핑·마우스"}
+  34: {name: Domestic_Appliance,   name_ko: "가전제품"}
+  35: {name: Power_Tool_Machine,   name_ko: "전동공구·기계"}
+  36: {name: Glass_Break_Impact,   name_ko: "유리깨짐·충격음"}
+  37: {name: Crowd_Applause,       name_ko: "군중·박수·환호"}
+
+# 원본 클래스명 → 압축 ID 매핑
+label_map:
+  # === ID 0: Speech ===
+  "Speech": 0
+  "Narration, monologue": 0
+  "Conversation": 0
+  "Whispering": 0
+  "Male speech, man speaking": 0
+  "Female speech, woman speaking": 0
+  "Child speech, kid speaking": 0
+  "Babbling": 0
+  "TV / Radio": 0
+
+  # === ID 1: Shout_Scream ===
+  "Shout": 1
+  "Bellow": 1
+  "Whoop": 1
+  "Yell": 1
+  "Children shouting": 1
+  "Screaming": 1
+
+  # === ID 2: Laughter ===
+  "Laughter": 2
+  "Baby laughter": 2
+  "Giggle": 2
+  "Snicker": 2
+  "Chuckle, chortle": 2
+
+  # === ID 3: Cry_Sob ===
+  "Crying, sobbing": 3
+  "Baby cry, infant cry": 3
+  "Wail, moan": 3
+  "Whimper": 3
+  "Sigh": 3
+
+  # === ID 4: Human_Breath_Bodily ===
+  "Breathing": 4
+  "Cough": 4
+  "Sneeze": 4
+  "Sniff": 4
+  "Hiccup": 4
+  "Gargling": 4
+  "Burping, eructation": 4
+  "Chewing, mastication": 4
+
+  # === ID 5: Footsteps_Walk_Run ===
+  "Walk, footsteps": 5
+  "Run": 5
+
+  # === ID 6: Clap_Snap ===
+  "Clapping": 6
+  "Finger snapping": 6
+
+  # === ID 7: Singing_Vocal ===
+  "Singing": 7
+  "Whistling": 7
+  "Choir": 7
+  "Humming": 7
+  "Male singing": 7
+  "Female singing": 7
+  "Children singing": 7
+  "Yodeling": 7
+  "Synthetic singing": 7
+  "Beatboxing": 7
+
+  # === ID 8: Piano_Keys ===
+  "Piano": 8
+  "Electric piano": 8
+  "Keyboard (musical)": 8
+  "Organ": 8
+  "Electronic organ": 8
+  "Hammond organ": 8
+  "Harpsichord": 8
+
+  # === ID 9: Guitar_Plucked ===
+  "Acoustic guitar": 9
+  "Electric guitar": 9
+  "Bass guitar": 9
+  "Steel guitar, slide guitar": 9
+  "Ukulele": 9
+  "Mandolin": 9
+  "Banjo": 9
+  "Sitar": 9
+
+  # === ID 10: String_Bowed ===
+  "Violin, fiddle": 10
+  "Cello": 10
+  "Viola": 10
+  "Double bass": 10
+  "Bowed string instrument": 10
+
+  # === ID 11: Wind_Brass ===
+  "Trumpet": 11
+  "Bugle": 11
+  "French horn": 11
+  "Trombone": 11
+  "Saxophone": 11
+  "Clarinet": 11
+  "Oboe": 11
+  "Flute": 11
+  "Piccolo": 11
+  "Bagpipe": 11
+  "Harmonica": 11
+  "Accordion": 11
+
+  # === ID 12: Drums_Percussion ===
+  "Drum kit": 12
+  "Bass drum": 12
+  "Snare drum": 12
+  "Timpani": 12
+  "Tabla": 12
+  "Tambourine": 12
+  "Cymbal": 12
+  "Hi-hat": 12
+  "Wood block": 12
+  "Cowbell": 12
+  "Triangle": 12
+  "Marimba, xylophone": 12
+  "Gong": 12
+  "Castanets": 12
+
+  # === ID 13: Electronic_Synth ===
+  "Synthesizer": 13
+  "Sampler": 13
+  "Electronic music": 13
+  "Ambient music": 13
+
+  # === ID 14: Dog ===
+  "Dog": 14
+  "Bark": 14
+  "Yip": 14
+  "Howl": 14
+  "Bow-wow": 14
+  "Growling": 14
+
+  # === ID 15: Cat ===
+  "Cat": 15
+  "Purring": 15
+  "Meow": 15
+  "Hiss": 15
+  "Caterwaul": 15
+
+  # === ID 16: Bird ===
+  "Bird": 16
+  "Bird vocalization, bird call, bird song": 16
+  "Chirp, tweet": 16
+  "Squawk": 16
+  "Owl": 16
+  "Crow": 16
+  "Canary": 16
+  "Robin": 16
+
+  # === ID 17: Insect ===
+  "Insect": 17
+  "Cricket": 17
+  "Mosquito": 17
+  "Bee, wasp, etc.": 17
+  "Fly, housefly": 17
+
+  # === ID 18: Other_Animal ===
+  "Horse": 18
+  "Pig": 18
+  "Sheep": 18
+  "Goat": 18
+  "Duck": 18
+  "Quacking": 18
+  "Chicken, rooster": 18
+  "Frog": 18
+  "Snake": 18
+  "Rattlesnake": 18
+  "Lion, roaring": 18
+  "Tiger": 18
+  "Wild animals": 18
+  "Elephant": 18
+
+  # === ID 19: Car_Automobile ===
+  "Car": 19
+  "Motor vehicle (road)": 19
+  "Automobile": 19
+  "Racing car, auto racing": 19
+  "Car passing by": 19
+  "Bicycle": 19
+  "Skateboard": 19
+
+  # === ID 20: Motorcycle ===
+  "Motorcycle": 20
+
+  # === ID 21: Truck_Bus ===
+  "Truck": 21
+  "Bus": 21
+
+  # === ID 22: Train_Rail ===
+  "Train": 22
+  "Rail transport": 22
+  "Railroad car, train wagon": 22
+  "Subway, metro, underground": 22
+
+  # === ID 23: Aircraft ===
+  "Aircraft": 23
+  "Fixed-wing aircraft, airplane": 23
+  "Propeller, airscrew": 23
+  "Turbojet, turbofan": 23
+  "Helicopter": 23
+
+  # === ID 24: Boat_Ship ===
+  "Boat, rowboat, sailboat, canoe": 24
+  "Ship": 24
+  "Motorboat, speedboat": 24
+
+  # === ID 25: Rain ===
+  "Rain": 25
+
+  # === ID 26: Thunder_Storm ===
+  "Thunderstorm": 26
+  "Thunder": 26
+
+  # === ID 27: Wind_Rustling ===
+  "Wind": 27
+  "Rustling leaves": 27
+  "Paper rustling": 27
+
+  # === ID 28: Water_Flow ===
+  "Stream": 28
+  "Waterfall": 28
+  "Ocean": 28
+  "Waves, surf": 28
+  "Water": 28
+  "Drip": 28
+
+  # === ID 29: Fire_Crackle ===
+  "Fire": 29
+  "Crackle": 29
+  "Explosion": 29
+  "Gunshot, gunfire": 29
+  "Fireworks": 29
+
+  # === ID 30: Door_Window ===
+  "Door": 30
+  "Slam": 30
+  "Knock": 30
+  "Squeak": 30
+  "Key jingle": 30
+  "Zip / Velcro": 30
+
+  # === ID 31: Phone_Notification ===
+  "Telephone": 31
+  "Mobile phone": 31
+  "Ringtone": 31
+  "Beep, bleep": 31
+
+  # === ID 32: Alarm_Siren ===
+  "Alarm clock": 32
+  "Alarm": 32
+  "Civil defense siren": 32
+  "Foghorn": 32
+  "Buzzer": 32
+  "Fire alarm": 32
+  "Siren": 32
+  "Smoke detector, smoke alarm": 32
+  "Car alarm": 32
+
+  # === ID 33: Keyboard_Typing_Mouse ===
+  "Computer keyboard": 33
+  "Typing": 33
+  "Typewriter": 33
+  "Mouse click": 33
+  "Writing": 33
+
+  # === ID 34: Domestic_Appliance ===
+  "Vacuum cleaner": 34
+  "Washing machine": 34
+  "Dishwasher": 34
+  "Microwave oven": 34
+  "Blender": 34
+  "Printer": 34
+  "Air conditioning": 34
+  "Mechanical fan": 34
+  "Electronic buzz / Hum": 34
+
+  # === ID 35: Power_Tool_Machine ===
+  "Drill": 35
+  "Power tool": 35
+  "Chainsaw": 35
+  "Lawn mower": 35
+  "Jackhammer": 35
+  "Sawing": 35
+  "Grinding": 35
+  "Welding": 35
+  "Hammering": 35
+
+  # === ID 36: Glass_Break_Impact ===
+  "Breaking": 36
+  "Glass": 36
+  "Shatter": 36
+  "Smash": 36
+  "Crash": 36
+  "Bang": 36
+  "Boom": 36
+  "Thud": 36
+  "Board game / Card sound": 36
+
+  # === ID 37: Crowd_Applause ===
+  "Crowd": 37
+  "Audience": 37
+  "Cheering": 37
+  "Applause": 37
+  "Chatter": 37
+  "Hubbub, speech noise": 37

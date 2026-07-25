@@ -96,4 +96,32 @@ class PressButtonTask(PrimitiveTask):
     def get_intention_score(self, physics, threshold=0.2, discrete=True):
         target_button = self.conditions.conditions[0].button._mjcf_model.model
         return self.get_intention_score_to_entity(physics, target_button, threshold, discrete)
+
+    def get_exclusive_intention_info(self, physics, threshold=0.2, margin=0.03):
+        target_button = self.conditions.conditions[0].button._mjcf_model.model
+        button_names = [
+            name for name in self.entities
+            if "button" in name and name not in self.random_ignored_entities
+        ]
+        other_buttons = [name for name in button_names if name != target_button]
+
+        target_dist = float(self.intention_distance.get(target_button, np.inf))
+        other_distances = {
+            name: float(self.intention_distance.get(name, np.inf))
+            for name in other_buttons
+        }
+        nearest_other = min(other_distances.values(), default=np.inf)
+        target_reached = target_dist < threshold
+        target_is_distinct = target_dist + margin < nearest_other
+        exclusive_success = bool(target_reached and target_is_distinct)
+
+        return {
+            "target_button": target_button,
+            "target_min_dist": target_dist,
+            "nearest_other_button_min_dist": float(nearest_other),
+            "other_button_min_distances": other_distances,
+            "exclusive_score": int(exclusive_success),
+            "exclusive_success": exclusive_success,
+            "exclusive_margin": float(margin),
+        }
    

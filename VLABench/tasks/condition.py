@@ -277,6 +277,53 @@ class JointInRangeCondition(Condition):
                 return False
         return True
 
+@register.add_condition("drawer_open")
+class DrawerOpenCondition(Condition):
+    """
+    A specific drawer of a multi-drawer container (ContainerWithDrawer) should be
+    pulled open past a threshold. Unlike `joint_in_range`, this targets one drawer
+    of a container that owns several slide joints, and is asset-agnostic about the
+    sign of the slide direction.
+
+    The drawer's slide joint rests near qpos=0 when closed and travels toward the
+    range endpoint with the larger magnitude when opened (this holds for the
+    cabinet assets whose ranges are e.g. [-0.32, 0.01] or [-0.005, 0.32]). We
+    therefore measure a normalized open fraction |qpos| / max(|lo|, |hi|) that is
+    ~0 when closed and ~1 when fully open, regardless of pull direction.
+
+    Params:
+        container: the ContainerWithDrawer entity (resolved from its name)
+        elevation: which drawer to check; matched against the joint name substring
+            ("top" / "middle" / "bottom")
+        open_threshold: open fraction in [0, 1] the drawer must exceed
+    """
+    def __init__(self, container, elevation, open_threshold=0.4):
+        self.container = container
+        self.elevation = elevation
+        self.open_threshold = open_threshold
+
+    def _target_joint(self):
+        for joint in self.container.joints:
+            if self.elevation in joint.name:
+                return joint
+        raise ValueError(
+            f"No drawer joint matching '{self.elevation}' on "
+            f"{self.container.mjcf_model.model}; joints="
+            f"{[j.name for j in self.container.joints]}"
+        )
+
+    def open_fraction(self, physics):
+        bound = physics.bind(self._target_joint())
+        qpos = float(np.asarray(bound.qpos).ravel()[0])
+        lo, hi = [float(v) for v in np.asarray(bound.range).ravel()[:2]]
+        span = max(abs(lo), abs(hi))
+        if span == 0:
+            return 0.0
+        return abs(qpos) / span
+
+    def is_met(self, physics=None):
+        return self.open_fraction(physics) > self.open_threshold
+
 @register.add_condition("lift")
 class LiftCondition(Condition):
     """

@@ -75,6 +75,7 @@ name2class_xml = {
     "mahjong": [components.Mahjong, "obj/meshes/mahjong/mahjong.xml"],
     "billiards": [components.BilliardBall, "obj/meshes/billiard_balls/billiards.xml"],
     "number_cube":[components.NumberCube, "obj/meshes/number_cube/numbercube.xml"],
+    "radio": [components.Radio, "obj/meshes/radio/radio.xml"],
     
     # flowers
     "wilted_flower": [components.CommonGraspedEntity, get_object_list(os.path.join(xml_root, "obj/meshes/flowers/wilted_flower"))],

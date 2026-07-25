@@ -1,4 +1,5 @@
 from VLABench.tasks.hierarchical_tasks.primitive.add_condiment_series import *
+from VLABench.tasks.hierarchical_tasks.primitive.find_hidden_object_open_series import *
 from VLABench.tasks.hierarchical_tasks.primitive.insert_flower_series import *
 from VLABench.tasks.hierarchical_tasks.primitive.physical_series import *
 from VLABench.tasks.hierarchical_tasks.primitive.select_billiards_series import *
@@ -10,4 +11,7 @@ from VLABench.tasks.hierarchical_tasks.primitive.select_ingredient_series import
 from VLABench.tasks.hierarchical_tasks.primitive.select_mahjong_series import *
 from VLABench.tasks.hierarchical_tasks.primitive.select_painting_series import *
 from VLABench.tasks.hierarchical_tasks.primitive.select_poker_series import *
+from VLABench.tasks.hierarchical_tasks.primitive.select_radio_series import *
+from VLABench.tasks.hierarchical_tasks.primitive.select_radio_silent_series import *
+from VLABench.tasks.hierarchical_tasks.primitive.select_radio_two_series import *
 from VLABench.tasks.hierarchical_tasks.primitive.select_toy_series import *

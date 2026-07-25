@@ -1,6 +1,7 @@
 from VLABench.tasks.hierarchical_tasks.composite.cluster_series import *
 from VLABench.tasks.hierarchical_tasks.composite.cook_dishes import *
 from VLABench.tasks.hierarchical_tasks.composite.cool_drink_series import *
+from VLABench.tasks.hierarchical_tasks.composite.find_hidden_object_series import *
 from VLABench.tasks.hierarchical_tasks.composite.find_unseen_object import *
 from VLABench.tasks.hierarchical_tasks.composite.get_coffee_series import *
 from VLABench.tasks.hierarchical_tasks.composite.hammer_nail_series import *

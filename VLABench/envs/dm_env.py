@@ -145,6 +145,11 @@ class LM4ManipDMEnv(composer.Environment):
                                                                                     rgb=multi_view_rgb,
                                                                                     depth=multi_view_depth)
         observation["ee_state"] = self.robot.get_ee_state(self.physics)
+        # LeRobot-compatible flat state: [q_state | ee_state]
+        observation["state"] = np.concatenate([
+            observation["q_state"],
+            observation["ee_state"],
+        ]).astype(np.float32)
         observation["grasped_obj_name"] = self.get_grasped_entity()
         observation.update(self.task.task_observables)
         return observation
@@ -215,6 +220,16 @@ class LM4ManipDMEnv(composer.Environment):
         Get the intention score of the task
         """
         return self.task.get_intention_score(self.physics, threshold, discrete)
+
+    def get_exclusive_intention_info(self, threshold=0.5, margin=0.03):
+        """
+        Get task-specific exclusive intention diagnostics when available.
+        """
+        if not hasattr(self.task, "get_exclusive_intention_info"):
+            return None
+        return self.task.get_exclusive_intention_info(
+            self.physics, threshold=threshold, margin=margin
+        )
     
     def get_task_progress(self):
         """

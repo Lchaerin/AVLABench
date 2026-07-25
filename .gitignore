@@ -183,3 +183,20 @@ test
 
 ssh/
 gitconfig
+
+
+*.wav
+*.mp4
+*.json
+*.mat
+*.sofa
+*.hdf5
+
+# Generated datasets and model artifacts
+*.pt
+*.parquet
+outputs/
+
+src/rrt-algorithms/
+dataset_take_out_microwave_food_oracle_lerobot_old/
+wandb/

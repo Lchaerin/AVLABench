@@ -203,6 +203,12 @@ class Painting(FlatContainer, CommonGraspedEntity):
         data_to_save["specific_painting"] = self.specific_painting
         return data_to_save
 
+@register.add_entity("Radio")
+class Radio(CommonGraspedEntity):
+    """Radio object used as a visual cue in button-press tasks."""
+    def _build(self, **kwargs):
+        super()._build(**kwargs)
+
 @register.add_entity("Poker")
 class Poker(CommonGraspedEntity):
     suites = ["spades", "clubs", "diamonds", "hearts"]

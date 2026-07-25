@@ -12,13 +12,14 @@ with open(os.path.join(os.getenv("VLABENCH_ROOT"), "configs/robot_config.json"),
 with open(os.path.join(os.getenv("VLABENCH_ROOT"), "configs/task_config.json"), "r") as f:
     TASK_CONFIG = json.load(f)
 
-def load_env(task, 
-             robot="franka", 
-             config=None, 
-             time_limit=float('inf'), 
-             reset_wait_step=10, 
-             episode_config=None, 
+def load_env(task,
+             robot="franka",
+             config=None,
+             time_limit=float('inf'),
+             reset_wait_step=10,
+             episode_config=None,
              random_init=False,
+             random_state=None,
              **kwargs):
     """
     load environment with given config
@@ -50,6 +51,13 @@ def load_env(task,
         # forbid random initialization if given episode config
         random_init = False 
     task = register.load_task(task)(task, robot, episode_config=episode_config, random_init=random_init, **kwargs)
-    env = LM4ManipDMEnv(task=task, time_limit=time_limit, reset_wait_step=reset_wait_step)
+    env_kwargs = dict(task=task, time_limit=time_limit, reset_wait_step=reset_wait_step)
+    # Forward an explicit random_state when provided. dm_control's composer
+    # creates its own np.random.RandomState() from OS entropy when this is
+    # None, which is fine for normal runs but defeats deterministic retries
+    # on mjWARN_BADQACC at reset.
+    if random_state is not None:
+        env_kwargs["random_state"] = random_state
+    env = LM4ManipDMEnv(**env_kwargs)
     env.reset()
     return env

@@ -212,7 +212,7 @@ class LM4ManipBaseTask(composer.Task):
                 if k in ["robot"]:
                     specific_condition[k] = self.robot
                     continue
-                if k in ["positions", "target_pos_range"]: continue
+                if k in ["positions", "target_pos_range", "elevation"]: continue
                 if isinstance(entities, str):
                     specific_condition[k] = self.entities.get(entities, None)
                 elif isinstance(entities, list):
