@@ -21,6 +21,10 @@ START_IDLE_SECONDS="${START_IDLE_SECONDS:-2.0}"
 DATASET_FPS="${DATASET_FPS:-10}"
 MAX_PARALLEL="${MAX_PARALLEL:-2}"          # concurrent slot jobs (GPU-bound)
 SLOTS=(left_top right_top left_bottom right_bottom)
+# Drop the observation streams nothing downstream reads (depth, point clouds,
+# robot_mask, and the image_0..3 duplicate of `rgb`): 163 MB -> ~33 MB per
+# episode, i.e. 29 GB instead of 143 GB for a 880-episode set.
+SLIM_HDF5="${SLIM_HDF5:-1}"
 
 cd "${REPO_ROOT}"
 rm -rf "${STAGING}"; mkdir -p "${STAGING}" "${LOGDIR}" "${GEN_ROOT}/${TASK}"
@@ -35,12 +39,19 @@ for slot in "${SLOTS[@]}"; do
     while (( $(jobs -rp | wc -l) >= MAX_PARALLEL )); do
         wait -n 2>/dev/null || fail=1
     done
-    # bottom slots have a lower oracle success rate -> more attempts
+    # bottom slots have a lower oracle success rate -> more attempts. The scene
+    # gates reject a further slice (drawer not shut at start, object not hidden
+    # in its labelled drawer, episode too short to contain a real reach+pull),
+    # so the budget is larger than the raw oracle success rate alone implies.
+    # A gate rejection at reset costs ~5 s vs ~40 s for a full episode, so a
+    # generous budget is cheap.
     case "$slot" in
-        *_bottom) mult=8 ;;
-        *)        mult=3 ;;
+        *_bottom) mult=12 ;;
+        *)        mult=5 ;;
     esac
     attempts=$(( PER_SLOT * mult + 20 ))
+    slim_flag=()
+    [[ "${SLIM_HDF5}" == "1" ]] && slim_flag=(--slim-hdf5)
     save_dir="${STAGING}/${slot}"          # data -> save_dir/${TASK}/
     log="${LOGDIR}/${slot}.log"
     echo "  start ${slot}: need=${PER_SLOT} attempts<=${attempts}  log=${log}"
@@ -52,6 +63,7 @@ for slot in "${SLOTS[@]}"; do
         --n-sample "${attempts}" --max-episode "${PER_SLOT}" \
         --start-idle-seconds "${START_IDLE_SECONDS}" \
         --dataset-fps "${DATASET_FPS}" \
+        "${slim_flag[@]}" \
         >"${log}" 2>&1 &
 done
 

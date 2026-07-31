@@ -53,6 +53,12 @@ BATCH_SIZE="${BATCH_SIZE:-32}"
 NUM_GPUS="${NUM_GPUS:-1}"
 RESUME="${RESUME:-0}"
 VLM_LORA="${VLM_LORA:-1}"
+# Two-phase fine-tune (src/staged_freeze): train as configured, then freeze the
+# PaliGemma tower (LoRA adapters included) and continue with the action expert
+# only. Empty = off. Set exactly one of FRAC (0<f<1) or STEP.
+FREEZE_LLM_AT_FRAC="${FREEZE_LLM_AT_FRAC:-}"
+FREEZE_LLM_AT_STEP="${FREEZE_LLM_AT_STEP:-}"
+FREEZE_LLM_AUDIO_HEADS="${FREEZE_LLM_AUDIO_HEADS:-0}"
 LORA_RANK="${LORA_RANK:-16}"
 LORA_ALPHA="${LORA_ALPHA:-16}"
 LORA_DROPOUT="${LORA_DROPOUT:-0.05}"
@@ -139,6 +145,9 @@ if [[ "${DO_TRAIN}" == "1" ]]; then
         "OPENPI_PI0_JAX_WEIGHT=${OPENPI_PI0_JAX_WEIGHT}" \
         "OPENPI_PI0_PYTORCH_WEIGHT=${OPENPI_PI0_PYTORCH_WEIGHT}" \
         "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" \
+        "OPENPI_FREEZE_LLM_AT_FRAC=${FREEZE_LLM_AT_FRAC}" \
+        "OPENPI_FREEZE_LLM_AT_STEP=${FREEZE_LLM_AT_STEP}" \
+        "OPENPI_FREEZE_LLM_AUDIO_HEADS=${FREEZE_LLM_AUDIO_HEADS}" \
         "${lora_env[@]}" \
         uv --project "${OPENPI_ROOT}" run \
         "${launcher[@]}" python "${OPENPI_ROOT}/scripts/train_pytorch.py" \

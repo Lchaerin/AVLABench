@@ -46,6 +46,12 @@ DECAY_STEPS="${DECAY_STEPS:-15000}"      # =TRAIN_STEPS → cosine 완전 감쇠
 # LoRA (PaliGemma)
 VLM_LORA="${VLM_LORA:-1}"
 FREEZE_PALIGEMMA="${FREEZE_PALIGEMMA:-0}"
+# Two-phase fine-tune (src/staged_freeze): train as configured, then freeze the
+# PaliGemma tower (LoRA adapters included) and continue with the action expert
+# only. Empty = off. Set exactly one of FRAC (0<f<1) or STEP.
+FREEZE_LLM_AT_FRAC="${FREEZE_LLM_AT_FRAC:-}"
+FREEZE_LLM_AT_STEP="${FREEZE_LLM_AT_STEP:-}"
+FREEZE_LLM_AUDIO_HEADS="${FREEZE_LLM_AUDIO_HEADS:-0}"
 LORA_RANK="${LORA_RANK:-16}"
 LORA_ALPHA="${LORA_ALPHA:-16}"
 LORA_DROPOUT="${LORA_DROPOUT:-0.05}"
@@ -65,8 +71,15 @@ cat <<EOF
    lora=${VLM_LORA} (rank=${LORA_RANK} alpha=${LORA_ALPHA})  freeze_pg=${FREEZE_PALIGEMMA}
 EOF
 
-if [[ -z "${OPENPI_PI0_JAX_WEIGHT:-}" || -z "${OPENPI_PI0_PYTORCH_WEIGHT:-}" ]]; then
-    echo "[err] OPENPI_PI0_JAX_WEIGHT / OPENPI_PI0_PYTORCH_WEIGHT 를 export 하세요."; exit 1
+# pi0 배치는 OPENPI_PI0_*, pi0.5 배치는 OPENPI_PI05_* 를 쓴다 (config.py 참조).
+# 둘 중 한 쌍만 있으면 되고, 아래 env 전달은 있는 것만 넘긴다.
+weight_env=()
+[[ -n "${OPENPI_PI0_JAX_WEIGHT:-}"      ]] && weight_env+=("OPENPI_PI0_JAX_WEIGHT=${OPENPI_PI0_JAX_WEIGHT}")
+[[ -n "${OPENPI_PI0_PYTORCH_WEIGHT:-}"  ]] && weight_env+=("OPENPI_PI0_PYTORCH_WEIGHT=${OPENPI_PI0_PYTORCH_WEIGHT}")
+[[ -n "${OPENPI_PI05_JAX_WEIGHT:-}"     ]] && weight_env+=("OPENPI_PI05_JAX_WEIGHT=${OPENPI_PI05_JAX_WEIGHT}")
+[[ -n "${OPENPI_PI05_PYTORCH_WEIGHT:-}" ]] && weight_env+=("OPENPI_PI05_PYTORCH_WEIGHT=${OPENPI_PI05_PYTORCH_WEIGHT}")
+if [[ -z "${OPENPI_PI0_PYTORCH_WEIGHT:-}" && -z "${OPENPI_PI05_PYTORCH_WEIGHT:-}" ]]; then
+    echo "[err] OPENPI_PI0_PYTORCH_WEIGHT 또는 OPENPI_PI05_PYTORCH_WEIGHT 를 export 하세요."; exit 1
 fi
 [[ -d "${LEROBOT_DIR}" ]] || { echo "[err] missing ${LEROBOT_DIR}"; exit 1; }
 
@@ -81,8 +94,7 @@ ln -sfn "${LEROBOT_DIR}" "${LEROBOT_CACHE}"
 if [[ "${DO_NORM}" == "1" ]]; then
     echo "==================== [1] compute norm stats ===================="
     env "UV_CACHE_DIR=${UV_CACHE_DIR}" \
-        "OPENPI_PI0_JAX_WEIGHT=${OPENPI_PI0_JAX_WEIGHT}" \
-        "OPENPI_PI0_PYTORCH_WEIGHT=${OPENPI_PI0_PYTORCH_WEIGHT}" \
+        "${weight_env[@]}" \
         uv --project "${OPENPI_ROOT}" run python \
         "${OPENPI_ROOT}/scripts/compute_norm_stats.py" --config-name "${POLICY_CONFIG}"
 fi
@@ -119,10 +131,12 @@ if [[ "${DO_TRAIN}" == "1" ]]; then
 
     env "UV_CACHE_DIR=${UV_CACHE_DIR}" \
         "WANDB_MODE=${WANDB_MODE}" \
-        "OPENPI_PI0_JAX_WEIGHT=${OPENPI_PI0_JAX_WEIGHT}" \
-        "OPENPI_PI0_PYTORCH_WEIGHT=${OPENPI_PI0_PYTORCH_WEIGHT}" \
+        "${weight_env[@]}" \
         "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" \
         "OPENPI_FREEZE_PALIGEMMA=${FREEZE_PALIGEMMA}" \
+        "OPENPI_FREEZE_LLM_AT_FRAC=${FREEZE_LLM_AT_FRAC}" \
+        "OPENPI_FREEZE_LLM_AT_STEP=${FREEZE_LLM_AT_STEP}" \
+        "OPENPI_FREEZE_LLM_AUDIO_HEADS=${FREEZE_LLM_AUDIO_HEADS}" \
         "${lora_env[@]}" \
         uv --project "${OPENPI_ROOT}" run \
         "${runner[@]}" \

@@ -7,6 +7,7 @@ from scipy.spatial import cKDTree
 import cv2
 from sklearn.cluster import DBSCAN
 import logging
+import warnings
 import colorlog
 
 def normalize(v):
@@ -51,8 +52,46 @@ def euler_to_quaternion(roll, pitch, yaw):
 def quaternion_to_euler(quat, is_degree=False):
     # (w, x, y, z) -> (x, y, z, w)
     r = R.from_quat([quat[1], quat[2], quat[3], quat[0]])
-    euler_angles = r.as_euler('xyz', degrees=is_degree)  
+    euler_angles = r.as_euler('xyz', degrees=is_degree)
     return euler_angles
+
+def fold_roll_to_negative_branch(roll):
+    """Fold an 'xyz'-euler roll onto the single branch (-2*pi, 0].
+
+    `quaternion_to_euler` is scipy's `as_euler('xyz')`, which returns roll in
+    (-pi, pi]. The Franka's top-down home pose has roll ~= +-180 deg, i.e. it
+    sits *exactly* on that branch cut, so numerically identical wrist poses come
+    out as +3.141 or -3.132 depending on rounding. Left alone the recorded roll
+    is bimodal 2*pi apart, which inflates the action normaliser and — because
+    openpi trains delta actions (`action[t:t+H] - state[t]`) — hands the model
+    an impossible full-turn target whenever a chunk straddles the flip. Measured
+    on find_hidden v3: 3.07 % of chunks, carrying 70 % of the roll target energy.
+
+    Folding to (-2*pi, 0] is *stateless* — it needs only the current frame, so
+    the converter and the eval loop can apply it identically without temporal
+    unwrapping — and is a no-op for a pose already on the negative branch (e.g.
+    select_radio, whose roll never leaves -3.13 +- 0.01).
+
+    Only meaningful for a roll that lives near +-pi, which is the case for every
+    VLABench task (the gripper approaches top-down). A roll near 0 would be
+    *split* by this fold rather than joined, so that case warns.
+    """
+    roll = np.asarray(roll, dtype=np.float64)
+    # Only values the fold actually MOVES can be damaged by it, i.e. positive
+    # ones. A positive roll near +pi is the flipped top-down pose this exists to
+    # rejoin; a positive roll near 0 would instead be thrown to ~-2*pi, away
+    # from its negative neighbours. Negative rolls of any size pass through
+    # untouched, so they are not grounds to warn (find_hidden legitimately
+    # reaches -1.57 rad when the wrist turns to face the drawer handle).
+    if np.any((roll > 0.0) & (roll < 0.5 * np.pi)):
+        warnings.warn(
+            "fold_roll_to_negative_branch: positive roll values near 0 rad were "
+            "passed; this fold only joins a roll that lives near +-pi and will "
+            "split a near-zero roll instead. Check the euler convention for "
+            "this task.",
+            RuntimeWarning, stacklevel=2,
+        )
+    return np.where(roll > 0.0, roll - 2.0 * np.pi, roll)
 
 def matrix_to_quaternion(matrix):
     if matrix.shape == (9,):

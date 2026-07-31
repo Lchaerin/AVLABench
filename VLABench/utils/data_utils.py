@@ -34,10 +34,27 @@ def process_observations(observations:List[Dict])->Dict:
         processed_observations["point_cloud_colors"] = align_point_clouds(processed_observations["point_cloud_colors"])
     return processed_observations
 
-def save_single_data(data:Dict, save_dir:str, filename:str, data_name:str=None):
+# Observation streams that no downstream consumer of these HDF5 files reads, but
+# which dominate their size. Measured on one 93-frame find_hidden episode
+# (163 MB total): depth 67 MB, point_cloud_{points,colors} 31 MB, robot_mask
+# 0.7 MB, and the per-camera image_0..3 split 32 MB — a byte-for-byte duplicate
+# of `rgb` (32 MB), which is the stream convert_hdf5_to_lerobot.py actually
+# reads. Dropping all of it leaves ~33 MB/episode.
+SLIM_DROP_KEYS = ("depth", "robot_mask", "point_cloud_points", "point_cloud_colors")
+
+
+def save_single_data(data:Dict, save_dir:str, filename:str, data_name:str=None,
+                     drop_keys=None, split_rgb_per_camera:bool=True):
     """
     Save data to h5py format
+
+    Params:
+        drop_keys: observation streams to omit entirely (see SLIM_DROP_KEYS).
+        split_rgb_per_camera: also write `image_{i}` slices of `rgb`. On by
+            default for backward compatibility; `rgb` alone is what the LeRobot
+            converter reads, so the split is pure duplication.
     """
+    drop_keys = set(drop_keys or ())
     if data_name is None:
         data_name = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     if not os.path.exists(os.path.join(save_dir)):
@@ -51,6 +68,8 @@ def save_single_data(data:Dict, save_dir:str, filename:str, data_name:str=None):
     obs_group = data_group.create_group("observation")
     info_group = data_group.create_group("meta_info")
     for key, buffer in data.items():
+        if key in drop_keys:
+            continue
         if key in ["trajectory", "action", "binaural_audio"]:
             buffer = np.array(buffer, dtype=np.float32)
             data_group.create_dataset(key, data=buffer, compression='gzip', compression_opts=9)
@@ -71,11 +90,12 @@ def save_single_data(data:Dict, save_dir:str, filename:str, data_name:str=None):
                     arr = np.array(buffer, dtype=np.uint8)   # [T, n_cams, H, W, 3]
                     obs_group.create_dataset(key, data=arr, compression='gzip', compression_opts=9)
                     # also split per-camera for LeRobot compatibility
-                    for cam_i in range(arr.shape[1]):
-                        obs_group.create_dataset(
-                            f"image_{cam_i}", data=arr[:, cam_i],
-                            compression='gzip', compression_opts=9
-                        )
+                    if split_rgb_per_camera:
+                        for cam_i in range(arr.shape[1]):
+                            obs_group.create_dataset(
+                                f"image_{cam_i}", data=arr[:, cam_i],
+                                compression='gzip', compression_opts=9
+                            )
                 else:
                     buffer = np.array(buffer, dtype=np.float32)
                     obs_group.create_dataset(key, data=buffer, compression='gzip', compression_opts=9)

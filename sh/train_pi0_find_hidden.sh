@@ -53,6 +53,10 @@ MAX_PARALLEL="${MAX_PARALLEL:-2}"
 TOP_K="${TOP_K:-3}"
 IMAGE_SIZE="${IMAGE_SIZE:-224}"
 VCODEC="${VCODEC:-h264}"
+# Write the *achieved* EE pose into observation.state instead of the commanded
+# target. Without this state == action, and the policy learns the shortcut
+# action[0] = state, which misfires at eval where state lags the command.
+USE_REAL_STATE="${USE_REAL_STATE:-1}"
 
 # ---- training (openpi) -----------------------------------------------------
 POLICY_CONFIG="${POLICY_CONFIG:-pi0_ft_vlabench_find_hidden_lora}"
@@ -67,10 +71,21 @@ RESUME="${RESUME:-0}"
 # lr_schedule.decay_steps defaults to the config's built-in 60000. For short
 # runs pass DECAY_STEPS=TRAIN_STEPS so the cosine schedule fully decays.
 DECAY_STEPS="${DECAY_STEPS:-}"
+# Also exposed (the config's built-in is 2000, which is 18% of a short run and
+# leaves too little post-warmup schedule; the KISTI script exposes these too).
+PEAK_LR="${PEAK_LR:-}"
+WARMUP_STEPS="${WARMUP_STEPS:-}"
 VLM_LORA="${VLM_LORA:-1}"
 # Full/partial fine-tune of PaliGemma. LoRA (VLM_LORA=1) takes precedence, so
 # set VLM_LORA=0 to use FREEZE_PALIGEMMA (train_pytorch.py).
 FREEZE_PALIGEMMA="${FREEZE_PALIGEMMA:-0}"
+# Two-phase fine-tune (src/staged_freeze), same knobs as the KISTI script: train
+# everything (PaliGemma LoRA + action expert + heads) up to the switch, then
+# freeze the whole PaliGemma tower (LoRA adapters included) and continue with the
+# action expert only. Empty = off. Set exactly one of FRAC (0<f<1) or STEP.
+FREEZE_LLM_AT_FRAC="${FREEZE_LLM_AT_FRAC:-}"
+FREEZE_LLM_AT_STEP="${FREEZE_LLM_AT_STEP:-}"
+FREEZE_LLM_AUDIO_HEADS="${FREEZE_LLM_AUDIO_HEADS:-0}"
 LORA_RANK="${LORA_RANK:-16}"
 LORA_ALPHA="${LORA_ALPHA:-16}"
 LORA_DROPOUT="${LORA_DROPOUT:-0.05}"
@@ -116,7 +131,10 @@ if [[ "${DO_CONVERT}" == "1" ]]; then
     echo "==================== [2] convert -> LeRobot ===================="
     [[ -d "${SRC_DIR}" ]] || { echo "[err] missing ${SRC_DIR} (run generation first)"; exit 1; }
     rm -rf "${LEROBOT_DIR}"
+    convert_extra=()
+    [[ "${USE_REAL_STATE}" == "1" ]] && convert_extra+=(--use-real-state)
     "${CONVERT_PY[@]}" src/data/convert_hdf5_to_lerobot.py \
+        "${convert_extra[@]}" \
         --src-dir "${SRC_DIR}" \
         --out-dir "${LEROBOT_DIR}" \
         --repo-id "${REPO_ID}" \
@@ -143,6 +161,7 @@ if [[ "${DO_NORM}" == "1" ]]; then
     env "UV_CACHE_DIR=${UV_CACHE_DIR}" \
         "OPENPI_PI0_JAX_WEIGHT=${OPENPI_PI0_JAX_WEIGHT:-}" \
         "OPENPI_PI0_PYTORCH_WEIGHT=${OPENPI_PI0_PYTORCH_WEIGHT:-}" \
+        "OPENPI_PI05_PYTORCH_WEIGHT=${OPENPI_PI05_PYTORCH_WEIGHT:-}" \
         uv --project "${OPENPI_ROOT}" run python \
         "${OPENPI_ROOT}/scripts/compute_norm_stats.py" --config-name "${POLICY_CONFIG}"
 fi
@@ -157,6 +176,8 @@ if [[ "${DO_TRAIN}" == "1" ]]; then
     fi
     resume_flag=(); [[ "${RESUME}" == "1" ]] && resume_flag+=(--resume)
     decay_flag=(); [[ -n "${DECAY_STEPS}" ]] && decay_flag+=(--lr_schedule.decay_steps "${DECAY_STEPS}")
+    [[ -n "${PEAK_LR}" ]]      && decay_flag+=(--lr_schedule.peak_lr "${PEAK_LR}")
+    [[ -n "${WARMUP_STEPS}" ]] && decay_flag+=(--lr_schedule.warmup_steps "${WARMUP_STEPS}")
     launcher=()
     (( NUM_GPUS > 1 )) && launcher=(torchrun --standalone --nnodes=1 --nproc_per_node="${NUM_GPUS}")
     lora_env=()
@@ -173,8 +194,12 @@ if [[ "${DO_TRAIN}" == "1" ]]; then
         "WANDB_MODE=${WANDB_MODE}" \
         "OPENPI_PI0_JAX_WEIGHT=${OPENPI_PI0_JAX_WEIGHT}" \
         "OPENPI_PI0_PYTORCH_WEIGHT=${OPENPI_PI0_PYTORCH_WEIGHT}" \
+        "OPENPI_PI05_PYTORCH_WEIGHT=${OPENPI_PI05_PYTORCH_WEIGHT:-}" \
         "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True" \
         "OPENPI_FREEZE_PALIGEMMA=${FREEZE_PALIGEMMA}" \
+        "OPENPI_FREEZE_LLM_AT_FRAC=${FREEZE_LLM_AT_FRAC}" \
+        "OPENPI_FREEZE_LLM_AT_STEP=${FREEZE_LLM_AT_STEP}" \
+        "OPENPI_FREEZE_LLM_AUDIO_HEADS=${FREEZE_LLM_AUDIO_HEADS}" \
         "${lora_env[@]}" \
         uv --project "${OPENPI_ROOT}" run \
         "${launcher[@]}" python "${OPENPI_ROOT}/scripts/train_pytorch.py" \
@@ -204,6 +229,16 @@ if [[ "${DO_EVAL}" == "1" ]]; then
         echo "[err] no checkpoint under ${CKPT_ROOT}"; exit 1
     fi
     echo "==================== [5] eval ${TASK} @ ${POLICY_DIR} ===================="
+    # This path calls eval_pi05_audio.sh directly, so it does NOT infer the mic
+    # camera from the checkpoint the way sh/eval_pi05_find_hidden.sh does. Since
+    # the v3 rebuild moved the binaural listener camera 2 -> 1, a pre-v3
+    # checkpoint evaluated here silently gets the wrong (u,v) reference frame.
+    if [[ -z "${VLABENCH_MIC_CAM:-}" ]]; then
+        echo "[warn] VLABENCH_MIC_CAM is unset. Pre-v3 checkpoints need =2."
+        echo "[warn] Prefer: POLICY_DIR=... bash sh/eval_pi05_find_hidden.sh (infers it)."
+    else
+        echo "[eval] VLABENCH_MIC_CAM=${VLABENCH_MIC_CAM}"
+    fi
     EVAL_DIR="${REPO_ROOT}/outputs/eval_find_hidden" TASK_NAME="${TASK}" TAXONOMY="${TAXONOMY}" \
     LOCAL=1 POLICY_CONFIG="${POLICY_CONFIG}" POLICY_DIR="${POLICY_DIR}" \
     OPENPI_ROOT="${OPENPI_ROOT}" AUDIO_MODE="slots_uv" EVAL_MODE="oracle" \

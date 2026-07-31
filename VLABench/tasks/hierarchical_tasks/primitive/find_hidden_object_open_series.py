@@ -119,6 +119,226 @@ def _soften_cabinet_drawers(entity, damping=1.0, frictionloss=0.0):
             pass
 
 
+# --- scene sanity gates (data generation) -------------------------------------
+# `_soften_cabinet_drawers` drops the slide damping 50 -> 1 so the oracle can
+# actually pull a drawer open. Damping only resists *velocity*, so nothing holds
+# a drawer statically any more: the hidden object dropping into place during the
+# reset settle can shove its drawer out by several centimetres. When that
+# happens on the *target* drawer the `drawer_open` condition is already met
+# before the expert moves, the first `env.step` returns a terminal timestep and
+# the generator writes out a "successful" episode that contains only the
+# stay-still prefix (~2 s, zero task content). It also breaks the task premise
+# in two other ways: an ajar drawer is a *visual* giveaway of which drawer to
+# open, and an object that rides out with the drawer is no longer hidden and no
+# longer sits at the elevation its slot label claims.
+#
+# The three functions below let the generator repair what is repairable
+# (`close_all_drawers`) and reject what is not (`validate_hidden_scene`,
+# `validate_hidden_episode`).
+
+# A drawer at or below this open fraction is "shut" for our purposes: 0.02 of a
+# 0.32 m travel is 6 mm, below the visible-gap threshold and far below the 0.13
+# success threshold.
+DRAWER_SHUT_FRACTION = 0.02
+# Minimum recorded frames / EE travel for an episode to count as a real
+# demonstration. Measured on the 880-episode v2 set: the 10 degenerate episodes
+# had 20-39 frames and <= 0.176 m of travel, while every genuine episode had
+# >= 64 frames and >= 0.208 m, so these thresholds separate the two cleanly.
+MIN_EPISODE_FRAMES = 45
+MIN_EE_TRAVEL_M = 0.20
+# World-axis tolerances for "the object is still hidden in its labelled drawer",
+# checked against the settled position rather than the spawn position (the
+# object drops ~2 cm onto the drawer floor during the reset settle).
+OBJECT_MAX_ABS_DX = 0.08      # lateral drift inside the drawer
+OBJECT_MIN_DEPTH_BEHIND_HANDLE = 0.06   # obj_y - handle_y; < this means it's out
+OBJECT_MAX_DZ_ERROR = 0.05    # vertical error vs the labelled drawer level
+# Settled height of the object above the cabinet origin, per elevation label.
+# Nominal spawn is DRAWER_LOCAL_POS[...][2]; the object then falls onto the
+# drawer floor, which lands it ~0.02 m lower (measured: top 0.326 +- 0.046,
+# bottom 0.058 +- 0.018 over 880 episodes).
+SETTLED_LOCAL_Z = {"top": 0.326, "bottom": 0.058}
+# The middle drawer is a distractor that is never the answer, but the object can
+# fall into it. Used to reject episodes whose object is nearer the middle drawer
+# than its own label -- those carry an elevation cue that points at the wrong
+# drawer entirely.
+# (0.196 = top floor minus the ~0.13 m drawer pitch; it matches the observed
+# cluster of "top"-labelled episodes whose object had fallen one level down.)
+ALL_LEVEL_LOCAL_Z = {"top": 0.326, "middle": 0.196, "bottom": 0.058}
+
+
+def cabinet_entities(env):
+    """The task's cabinets, as {entity_name: entity}."""
+    return {k: v for k, v in env.task.entities.items() if "cabinet" in k}
+
+
+def drawer_open_fractions(env):
+    """{f"{cabinet}/{joint}": open_fraction} for every drawer in the scene.
+
+    Mirrors `DrawerOpenCondition.open_fraction`: |qpos| / max(|lo|, |hi|), which
+    is ~0 shut and ~1 fully open regardless of which way the asset's slide range
+    is signed.
+    """
+    out = {}
+    for name, entity in cabinet_entities(env).items():
+        for joint in entity.joints:
+            bound = env.physics.bind(joint)
+            qpos = float(np.asarray(bound.qpos).ravel()[0])
+            lo, hi = [float(v) for v in np.asarray(bound.range).ravel()[:2]]
+            span = max(abs(lo), abs(hi))
+            out[f"{name}/{joint.name}"] = abs(qpos) / span if span else 0.0
+    return out
+
+
+def _snapshot_robot_pose(env):
+    """Every robot joint's (joint, qpos) so it can be put back exactly."""
+    return [(joint, float(np.asarray(env.physics.bind(joint).qpos).ravel()[0]))
+            for joint in env.robot.joints]
+
+
+def _restore_robot_pose(env, snapshot):
+    """Undo any drift the settle steps introduced, then refresh derived state.
+
+    `env.step(None)` commands the arm to its *current* qpos (see
+    LM4ManipDMEnv.step), so gravity sag between steps is accepted as the new
+    target — a ratchet. Every extra settle step therefore lowers the arm a little,
+    and eval performs no such steps. Measured over 6 resets, deterministically:
+    the end effector rests at base-frame z=0.4319 straight after `env.reset()`
+    (exactly what eval records) but at 0.4137 after `close_all_drawers` — an
+    18 mm drop baked into the first recorded frame of every episode. That is the
+    same class of train/eval divergence as the 28.8 cm base-frame bug, just
+    smaller, so the arm is put back where the reset left it.
+
+    Safe to teleport: at rest the arm is nowhere near the cabinets, so no contact
+    is being resolved. `physics.forward()` recomputes xpos/xmat without stepping.
+    """
+    for joint, qpos in snapshot:
+        bound = env.physics.bind(joint)
+        bound.qpos = qpos
+        bound.qvel = 0.0
+    env.physics.forward()
+
+
+def close_all_drawers(env, settle_steps=10, max_rounds=3,
+                      shut_fraction=DRAWER_SHUT_FRACTION):
+    """Force every drawer shut and let the scene re-settle. Returns True if all
+    drawers ended up shut.
+
+    Iterates because one round is not always enough: the hidden object is still
+    in motion right after the reset settle, so it can push its drawer back out
+    while it comes to rest. Once it is resting on the drawer floor a re-close
+    sticks. Measured over 16 resets of the fragile bottom slot, 4 had drifted
+    past the threshold at raw reset (worst 0.118) and *all* of them were shut
+    (worst 0.004) after a single round — the extra rounds are for the tail.
+
+    The settle steps would otherwise leave the arm 18 mm lower than eval's rest
+    pose, so the robot is snapshotted up front and restored before returning —
+    see `_restore_robot_pose`.
+    """
+    robot_pose = _snapshot_robot_pose(env)
+    shut = False
+    for _ in range(int(max_rounds)):
+        for entity in cabinet_entities(env).values():
+            for joint in entity.joints:
+                bound = env.physics.bind(joint)
+                bound.qpos = 0.0
+                bound.qvel = 0.0
+        for _ in range(int(settle_steps)):
+            env.step()
+            # If a drawer drifted far enough to satisfy the success condition,
+            # this step returned a terminal timestep — and dm_control's
+            # composer.Environment silently calls reset() on the *next* step,
+            # re-randomising the whole scene behind our back. Stop stepping and
+            # let the caller reject the episode instead.
+            if env.task.conditions.is_met(env.physics):
+                _restore_robot_pose(env, robot_pose)
+                return False
+        if max(drawer_open_fractions(env).values(), default=0.0) <= shut_fraction:
+            shut = True
+            break
+    _restore_robot_pose(env, robot_pose)
+    return shut
+
+
+def _target_geometry(env):
+    """(cabinet entity, drawer id, cabinet world pos, handle world pos, object)."""
+    cm = env.task.config_manager
+    cab = env.task.entities[cm.target_cabinet_name]
+    drawer_id = ELEVATION_DRAWER_ID[cm.target_elevation]
+    cab_pos = np.array(cm.cabinet_positions[cm.target_side], dtype=float)
+    handle = np.array(cab.get_drawer_handle_pos(env.physics, drawer_id), dtype=float)
+    obj = env.task.entities[cm.target_entity]
+    return cab, drawer_id, cab_pos, handle, obj
+
+
+def _object_placement_problems(env):
+    """Reasons the hidden object is not properly hidden in its labelled drawer."""
+    cm = env.task.config_manager
+    _, _, cab_pos, handle, obj = _target_geometry(env)
+    obj_pos = np.array(obj.get_xpos(env.physics), dtype=float)
+    d = obj_pos - cab_pos
+    problems = []
+    if abs(d[0]) > OBJECT_MAX_ABS_DX:
+        problems.append(f"object drifted sideways (dx={d[0]:+.3f})")
+    depth = float(obj_pos[1] - handle[1])
+    if depth < OBJECT_MIN_DEPTH_BEHIND_HANDLE:
+        problems.append(f"object is out in front of the drawer (obj_y-handle_y={depth:+.3f})")
+    expected_z = SETTLED_LOCAL_Z[cm.target_elevation]
+    if abs(d[2] - expected_z) > OBJECT_MAX_DZ_ERROR:
+        problems.append(
+            f"object left the {cm.target_elevation} drawer "
+            f"(dz={d[2]:+.3f}, expected {expected_z:+.3f})"
+        )
+    nearest = min(ALL_LEVEL_LOCAL_Z, key=lambda k: abs(d[2] - ALL_LEVEL_LOCAL_Z[k]))
+    if nearest != cm.target_elevation:
+        problems.append(
+            f"object is nearest the {nearest} drawer but the label says "
+            f"{cm.target_elevation} (dz={d[2]:+.3f})"
+        )
+    return problems
+
+
+def validate_hidden_scene(env):
+    """Pre-flight check, run after reset (and after `close_all_drawers`).
+
+    Returns a list of human-readable reasons the episode should be discarded;
+    empty means the scene is usable. Rejecting here costs one wasted reset,
+    which is far cheaper than letting a degenerate episode into the dataset.
+    """
+    problems = []
+    fracs = drawer_open_fractions(env)
+    ajar = {k: v for k, v in fracs.items() if v > DRAWER_SHUT_FRACTION}
+    if ajar:
+        problems.append(
+            "drawer(s) not shut at episode start: "
+            + ", ".join(f"{k}={v:.3f}" for k, v in sorted(ajar.items()))
+        )
+    if env.task.conditions.is_met(env.physics):
+        problems.append("success condition already met before the expert moved")
+    problems.extend(_object_placement_problems(env))
+    return problems
+
+
+def validate_hidden_episode(env, n_frames, ee_travel_m):
+    """Post-hoc check, run once the expert sequence has finished.
+
+    Catches the "drawer opened on its own" episodes that slipped past the
+    pre-flight check (the condition can also fire mid-approach, before the
+    gripper ever reaches the handle) and episodes where the object left the
+    target drawer during the pull, which would mislabel the stored audio cue.
+    """
+    problems = []
+    if n_frames < MIN_EPISODE_FRAMES:
+        problems.append(
+            f"episode too short: {n_frames} frames < {MIN_EPISODE_FRAMES} "
+            f"(drawer likely opened without a real reach+pull)"
+        )
+    if ee_travel_m < MIN_EE_TRAVEL_M:
+        problems.append(
+            f"end effector barely moved: {ee_travel_m:.3f} m < {MIN_EE_TRAVEL_M} m"
+        )
+    return problems
+
+
 def _pull_open(env, target_pos, n_substep=20):
     """Pull the (already-grasped) drawer handle to `target_pos` with enough
     physics substeps per waypoint that the position-controlled arm actually
@@ -171,23 +391,36 @@ def _forced_slot():
     """Optional override so balanced datasets can force a specific slot.
 
     VLABENCH_HIDDEN_SLOT_LABEL = "<azimuth>_<elevation>", e.g. "left_top".
+
+    A comma-separated list restricts the draw to that *set* instead of pinning a
+    single slot, picking uniformly per episode: "left_top,right_top" evaluates
+    the two top drawers with the same balance the generator produces, in one
+    run. Generation still passes a single label (one job per slot).
     """
     label = os.environ.get("VLABENCH_HIDDEN_SLOT_LABEL")
     if not label:
         return None
-    try:
-        side, elevation = label.split("_")
-    except ValueError:
-        raise ValueError(
-            "VLABENCH_HIDDEN_SLOT_LABEL must be '<azimuth>_<elevation>', "
-            f"got: {label}"
-        )
-    if side not in AZIMUTH_LABELS or elevation not in ELEVATION_LABELS:
-        raise ValueError(
-            f"Invalid slot '{label}'. azimuth in {AZIMUTH_LABELS}, "
-            f"elevation in {ELEVATION_LABELS}."
-        )
-    return side, elevation
+    choices = []
+    for item in label.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            side, elevation = item.split("_")
+        except ValueError:
+            raise ValueError(
+                "VLABENCH_HIDDEN_SLOT_LABEL must be '<azimuth>_<elevation>' or a "
+                f"comma-separated list of them, got: {label}"
+            )
+        if side not in AZIMUTH_LABELS or elevation not in ELEVATION_LABELS:
+            raise ValueError(
+                f"Invalid slot '{item}'. azimuth in {AZIMUTH_LABELS}, "
+                f"elevation in {ELEVATION_LABELS}."
+            )
+        choices.append((side, elevation))
+    if not choices:
+        raise ValueError(f"VLABENCH_HIDDEN_SLOT_LABEL is empty: {label!r}")
+    return random.choice(choices)
 
 
 @register.add_config_manager("find_hidden_object_open")

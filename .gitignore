@@ -200,3 +200,7 @@ outputs/
 src/rrt-algorithms/
 dataset_take_out_microwave_food_oracle_lerobot_old/
 wandb/
+
+# Generated LeRobot/HDF5 dataset trees (contents already ignored by
+# *.parquet/*.mp4/*.json/*.hdf5; this keeps the dirs out of `git status` too)
+dataset_*/

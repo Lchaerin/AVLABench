@@ -37,7 +37,9 @@ import VLABench.tasks                                               # noqa: E402
 from VLABench.envs import load_env                                  # noqa: E402
 from VLABench.tasks import *                                        # noqa: E402, F401, F403
 from VLABench.robots import *                                       # noqa: E402, F401, F403
-from VLABench.utils.utils import euler_to_quaternion, quaternion_to_euler  # noqa: E402
+from VLABench.utils.utils import (euler_to_quaternion,  # noqa: E402
+                                  fold_roll_to_negative_branch,
+                                  quaternion_to_euler)
 from dm_control.rl.control import PhysicsError                      # noqa: E402
 
 # --- Our project imports ----------------------------------------------------
@@ -48,7 +50,7 @@ from src.models.smolvla_audio import (                              # noqa: E402
 )
 from src.audio.oracle_sled import (                                 # noqa: E402
     OracleNoiseConfig, extract_episode_gt, build_oracle_topk,
-    TopKClassSmoother,
+    TopKClassSmoother, resolve_mic_cam_id,
 )
 
 # Reuse the trajectory-generation helpers verbatim
@@ -79,9 +81,15 @@ REVISED_SILENT_RADIO_INSTRUCTION = (
 FIND_HIDDEN_INSTRUCTION = (
     "Open the drawer of the cabinet that contains the object making the sound."
 )
+# Cameras the policy sees. These must match convert_hdf5_to_lerobot's
+# DEFAULT_CAM_MAP ({"image": 2, "second_image": 0, "wrist_image": 3}).
 FRONT_CAM = 2
 SECOND_CAM = 0
 WRIST_CAM = 3
+# The binaural listener ("mic") is a separate camera from the policy image — for
+# find_hidden it is camera 1, re-posed low and centred so the top/bottom drawer
+# elevation cue separates. See src/audio/oracle_sled.resolve_mic_cam_id.
+# Resolved per task at rollout time, never hardcoded here.
 GRIPPER_OPEN = np.full(2, 0.04)
 GRIPPER_CLOSED = np.zeros(2)
 
@@ -180,7 +188,7 @@ def _build_episode_audio_cfg(audio_config_path: str, active_radio: str,
             "gain":        1.0,
         })
     return {
-        "cam_id":    base.get("cam_id", FRONT_CAM),
+        "cam_id":    base.get("cam_id", resolve_mic_cam_id(task_name)),
         "hrtf_path": base.get("hrtf_path", ""),
         "tasks": {
             task_name: {"sources": sources},
@@ -407,6 +415,12 @@ def _build_policy_batch(env, audio_snap: dict, instruction: str,
     pos_base  = pos_world - np.asarray(robot_pos, dtype=np.float32)
     quat = np.asarray(ee_state[3:7], dtype=np.float32)
     euler = np.asarray(quaternion_to_euler(quat), dtype=np.float32)
+    # The top-down home pose has roll ~= +-pi, exactly on scipy's branch cut, so
+    # the same physical wrist reads as +3.141 or -3.132 frame to frame. Fold it
+    # onto one branch — byte-identical to what the converter writes into
+    # observation.state (convert_hdf5_to_lerobot._compute_real_state); without
+    # this the policy sees a 5.4-sigma state jump for an unchanged wrist.
+    euler[0] = fold_roll_to_negative_branch(euler[0])
     # NOTE: `franka.get_ee_open_state` is named wrong — it returns True when
     # the fingers are CLOSED (qpos < 0.035), not open. The converter writes
     # state[6] = 1.0 for *open* fingers (matching the gripper command
@@ -904,7 +918,7 @@ def evaluate_episode(args, episode_idx: int, policy, tokenizer, device,
             with open(args.audio_config) as _f:
                 _base_cfg = json.load(_f)
             cfg_dict = {
-                "cam_id":    _base_cfg.get("cam_id", FRONT_CAM),
+                "cam_id":    _base_cfg.get("cam_id", resolve_mic_cam_id(args.task_name)),
                 "hrtf_path": _base_cfg.get("hrtf_path", ""),
                 "tasks": {
                     args.task_name: {"sources": [{
@@ -952,6 +966,12 @@ def evaluate_episode(args, episode_idx: int, policy, tokenizer, device,
         time.sleep(args.warmup_seconds)
 
     robot_pos = np.asarray(env.get_robot_frame_position(), dtype=np.float32)
+    # Camera that acts as the binaural listener. Separate from FRONT_CAM (the
+    # policy image) because find_hidden puts the mic on a low, centred camera 1
+    # so the top/bottom drawer elevation cue separates; the audio labels in the
+    # training set were computed from this same camera, so a mismatch here is a
+    # silent train/eval divergence.
+    mic_cam_id = resolve_mic_cam_id(args.task_name)
     success = False
     frames = []
     audio_log = []                                # one entry per VLA step
@@ -1015,7 +1035,7 @@ def evaluate_episode(args, episode_idx: int, policy, tokenizer, device,
                 audio_snap = _empty_audio(top_k)
             else:
                 audio_snap = _oracle_snapshot(
-                    env, oracle_sources, cam_id=FRONT_CAM, top_k=top_k,
+                    env, oracle_sources, cam_id=mic_cam_id, top_k=top_k,
                     noise_cfg=oracle_noise_cfg, rng=oracle_rng,
                 )
         else:

@@ -88,6 +88,51 @@ class OracleNoiseConfig:
 
 
 # ---------------------------------------------------------------------------
+# Which camera is the microphone
+# ---------------------------------------------------------------------------
+# The listener ("binaural mic") pose is a camera pose, and it does not have to
+# be the camera whose image the policy sees. For the radio tasks both roles sit
+# on camera 2 (the front view). For find_hidden they are deliberately split:
+#
+#   camera 2 stays the policy image (unchanged, over-the-shoulder at z=1.75)
+#   camera 1 becomes the mic, re-posed low and centred in camera_config.json
+#
+# Why: the elevation cue that distinguishes the top from the bottom drawer is
+# the mic's *vertical* offset from the drawers. From z=1.75 both drawers are
+# well below the mic and their elevations bunch up; from z=1.20 they straddle
+# it. Measured over the 880-episode v2 set, on the projected (u, v) features the
+# SlotEncoder actually consumes:
+#
+#   mic pose                      u d' (left/right)   v d' (top/bottom)  offscreen
+#   cam2  (0, -1.05, 1.75)              12.35               5.54            0/880
+#   cam1  (-0.775, -0.856, 1.209)        9.89               4.87           12/880
+#   cam1' (0, -1.05, 1.20)              12.96               7.72            0/880
+#
+# Camera 1's stock pose is off-centre to the left, which squeezes the left
+# cabinet against the edge of its FOV and pushes 12 episodes off-screen
+# entirely (the audio slot then degrades to the (-1,-1) masked-out sentinel), so
+# camera 1 is re-posed rather than used as shipped. Camera 1's image is not in
+# DEFAULT_CAM_MAP, so re-posing it changes no policy input.
+TASK_MIC_CAM = {
+    "find_hidden_object_open": 1,
+    "find_hidden_object": 1,
+}
+DEFAULT_MIC_CAM = 2
+
+
+def resolve_mic_cam_id(task_name: str | None) -> int:
+    """Camera index that acts as the binaural listener for `task_name`.
+
+    `VLABENCH_MIC_CAM` overrides everything — needed to evaluate a checkpoint
+    trained before this split, whose audio labels were computed from camera 2.
+    """
+    override = os.environ.get("VLABENCH_MIC_CAM")
+    if override:
+        return int(override)
+    return TASK_MIC_CAM.get(task_name or "", DEFAULT_MIC_CAM)
+
+
+# ---------------------------------------------------------------------------
 # GT extraction from env state
 # ---------------------------------------------------------------------------
 def _ensure_project_on_path() -> None:

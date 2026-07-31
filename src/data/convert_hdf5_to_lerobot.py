@@ -122,6 +122,14 @@ def _resize_uint8(img: np.ndarray, hw: tuple[int, int]) -> np.ndarray:
     return cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
 
 
+# Origin of the robot base frame that *eval* uses, i.e. the value returned by
+# ``env.get_robot_frame_position()``. Read from the live sim for
+# find_hidden_object_open / select_radio; it is a scene constant. Both the state
+# and the action written here must be expressed relative to it, because
+# ``eval_smolvla_audio._apply_action`` adds it back to recover a world target.
+ROBOT_FRAME_POS = np.array([0.0, -0.7, 0.7], dtype=np.float32)
+
+
 def _binarize_gripper(g: float) -> float:
     return 1.0 if g > GRIPPER_OPEN_THRESHOLD else 0.0
 
@@ -139,9 +147,14 @@ def _compute_state_action(action_8d: np.ndarray) -> tuple[np.ndarray, np.ndarray
     stream — at 10 fps the policy's commanded pose is a close stand-in for
     where the robot actually is.
     """
+    # Imported lazily: VLABench.utils.utils pulls in open3d/sklearn, which the
+    # conversion venv does not necessarily have loaded at import time.
+    from VLABench.utils.utils import fold_roll_to_negative_branch
+
     T = action_8d.shape[0]
     out_action = np.zeros((T, 7), dtype=np.float32)
     out_action[:, :6] = action_8d[:, :6]
+    out_action[:, 3] = fold_roll_to_negative_branch(out_action[:, 3])
     for t in range(T):
         out_action[t, 6] = _binarize_gripper(float(action_8d[t, 6]))
     out_state = out_action.copy()
@@ -182,23 +195,42 @@ def _compute_real_state(action_8d: np.ndarray,
       orientation encoding is identical in train and eval regardless of how the
       action euler is stored.
     """
-    from VLABench.utils.utils import quaternion_to_euler
+    from VLABench.utils.utils import (fold_roll_to_negative_branch,
+                                      quaternion_to_euler)
 
     T = action_8d.shape[0]
     out_action = np.zeros((T, 7), dtype=np.float32)
     out_action[:, :6] = action_8d[:, :6]
+    # Roll lives on the (-pi, pi] branch cut for this scene's top-down home
+    # pose; fold it to a single branch before anything downstream differences
+    # it. Must match _build_policy_batch in src/eval/eval_smolvla_audio.py.
+    out_action[:, 3] = fold_roll_to_negative_branch(out_action[:, 3])
     for t in range(T):
         out_action[t, 6] = _binarize_gripper(float(action_8d[t, 6]))
 
     n = min(T, int(ee_state.shape[0]))
     ee = np.asarray(ee_state[:n], dtype=np.float32)
     ee_pos_world = ee[:, :3]
-    robot_off = np.median(ee_pos_world - out_action[:n, :3], axis=0)
+    # Origin of the frame the *recorded actions* live in, estimated from the
+    # data. This is NOT the frame eval uses (see ROBOT_FRAME_POS below).
+    action_frame_origin = np.median(ee_pos_world - out_action[:n, :3], axis=0)
+
+    # Re-express BOTH state and action in eval's base frame. Measured on
+    # find_hidden_object_open: the recorded actions sit at world origin
+    # (0.002, -0.412, 0.774) while eval's env.get_robot_frame_position() is
+    # (0, -0.700, 0.700) — a 28.8 cm / 7.4 cm gap in y / z. Training on the
+    # un-shifted data hands the policy a state that claims the arm is already
+    # 80 % through the reach, so it barely advances and stalls. See
+    # eval_smolvla_audio._apply_action, which reconstructs pos_world as
+    # pos_base + get_robot_frame_position().
+    shift = (action_frame_origin - ROBOT_FRAME_POS).astype(np.float32)
+    out_action[:, :3] += shift
 
     out_state = out_action.copy()  # tail frames (if ee shorter) fall back to cmd
     for t in range(n):
-        pos_base = ee_pos_world[t] - robot_off
+        pos_base = ee_pos_world[t] - ROBOT_FRAME_POS
         euler = np.asarray(quaternion_to_euler(ee[t, 3:7]), dtype=np.float32)
+        euler[0] = fold_roll_to_negative_branch(euler[0])
         gripper_open = 1.0 - float(ee[t, 7])   # invert buggy closed-flag → open=1
         out_state[t] = np.concatenate([pos_base, euler, [gripper_open]]).astype(np.float32)
     return out_state, out_action

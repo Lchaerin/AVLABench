@@ -77,10 +77,33 @@ class LM4ManipBaseTask(composer.Task):
         self.reset_camera_views()
     
     def reset_camera_views(self, index=2):
-        if self.task_name in CAMERA_VIEWS:
-            cameras = self._arena.mjcf_model.find_all("camera")
-            target_camera = cameras[index]
-            for attr, value in CAMERA_VIEWS[self.task_name].items():
+        """Apply this task's camera overrides.
+
+        Two entry shapes are supported in `camera_config.json`:
+
+        * flat  — ``{"pos": ..., "xyaxes": ...}``: applied to camera `index`
+          (the legacy form used by most tasks).
+        * keyed — ``{"2": {...}, "0": {...}}``: each key is a camera index, so
+          a task can retarget several cameras at once. Needed when the scene
+          blocks the default view from more than one angle.
+        """
+        if os.environ.get("VLABENCH_DISABLE_CAMERA_OVERRIDE", "0") == "1":
+            # Escape hatch for evaluating checkpoints trained BEFORE a task's
+            # camera override existed: the policy must see the same views it
+            # was trained on, and for find_hidden camera 2 also carries the
+            # microphone/uv reference, so a mismatch changes the audio too.
+            return
+        if self.task_name not in CAMERA_VIEWS:
+            return
+        spec = CAMERA_VIEWS[self.task_name]
+        if spec and all(isinstance(v, dict) for v in spec.values()):
+            per_camera = {int(k): v for k, v in spec.items()}
+        else:
+            per_camera = {index: spec}
+        cameras = self._arena.mjcf_model.find_all("camera")
+        for cam_index, attrs in per_camera.items():
+            target_camera = cameras[cam_index]
+            for attr, value in attrs.items():
                 setattr(target_camera, attr, value)
             
     def step(self, action):

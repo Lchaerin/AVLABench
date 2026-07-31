@@ -1,8 +1,16 @@
 """
 The scripts to launch auto scene load and key-point based trajectory generation.
 """
-import numpy as np
 import os
+import sys
+
+# Repo root on sys.path so `src.*` (audio oracle, projection helpers) imports
+# work when this script is run directly from anywhere.
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _REPO_ROOT not in sys.path:
+    sys.path.insert(0, _REPO_ROOT)
+
+import numpy as np
 import random
 import json
 import open3d as o3d
@@ -280,6 +288,25 @@ def get_args():
              'converter (default 10).',
     )
     parser.add_argument(
+        '--slim-hdf5',
+        action='store_true', default=False,
+        help='Omit the observation streams nothing downstream reads, to keep the '
+             'dataset a manageable size. Measured on one 93-frame find_hidden '
+             'episode: 163 MB total, of which depth (67 MB), point clouds '
+             '(31 MB), robot_mask and the image_0..3 duplicate of `rgb` (32 MB) '
+             'are dead weight — convert_hdf5_to_lerobot.py reads only '
+             'observation/rgb, observation/ee_state, action and meta_info. '
+             'Leaves ~33 MB/episode (880 episodes: 29 GB instead of 143 GB).',
+    )
+    parser.add_argument(
+        '--no-scene-gates',
+        action='store_true', default=False,
+        help='Disable the find_hidden scene sanity gates (drawers shut at '
+             'start, object actually hidden in its labelled drawer, episode '
+             'long enough to contain a real reach+pull). On by default; only '
+             'turn them off to reproduce a pre-gate dataset.',
+    )
+    parser.add_argument(
         '--target-position-label',
         choices=['left', 'middle', 'right',
                  'left_top', 'right_top', 'left_bottom', 'right_bottom'],
@@ -323,6 +350,62 @@ def _record_idle_frames(env, n_frames):
         observations.append(env.get_observation())
         waypoints.append(waypoint.copy())
     return observations, waypoints
+
+def _build_oracle_sources_meta(active_radio, radio_sound_meta,
+                               other_radio, other_sound_meta,
+                               sounding_sources_meta, microwave_audio_meta,
+                               record_start_step, logger):
+    """Assemble the `active_sources` list `extract_episode_gt` consumes.
+
+    Returns [] when the task has no oracle sound source this episode.
+
+    NOTE on ordering: the instruction-targeted source is listed first. That is
+    raw-storage bookkeeping only (it also drives audio_meta.json / the
+    instruction text) and must NOT reach the model as-is — it would let a policy
+    learn "always attend slot 0" instead of matching the instruction's class
+    name. convert_hdf5_to_lerobot.py re-sorts active_sources by azimuth
+    (task-left to task-right) before writing observation.audio.* / audio_slots,
+    so this order never leaks into training data.
+    """
+    meta = []
+    if active_radio is not None and (radio_sound_meta is not None
+                                     or sounding_sources_meta):
+        if radio_sound_meta is not None:
+            meta.append({
+                "name":       active_radio,
+                "class_id":   radio_sound_meta["class_id"],
+                "class_name": radio_sound_meta["class_name"],
+            })
+        if other_sound_meta is not None and other_radio is not None:
+            meta.append({
+                "name":       other_radio,
+                "class_id":   other_sound_meta["class_id"],
+                "class_name": other_sound_meta["class_name"],
+            })
+        for src in sounding_sources_meta:
+            sm = src["sound_meta"]
+            meta.append({
+                "name":       src["radio"],
+                "class_id":   sm["class_id"],
+                "class_name": sm["class_name"],
+            })
+    if microwave_audio_meta is not None:
+        # Convert the chime time from step_count units to recorded-frame units
+        # by subtracting the recording-start offset (see _record_start_step).
+        chime_frame = max(0, int(microwave_audio_meta["trigger_step"]) - record_start_step)
+        logger.info(
+            f"[oracle] chime active_from_frame={chime_frame} "
+            f"(trigger_step={microwave_audio_meta['trigger_step']} − "
+            f"record_start_step={record_start_step})"
+        )
+        meta.append({
+            "name":              microwave_audio_meta["object_name"],
+            "class_id":          microwave_audio_meta["class_id"],
+            "class_name":        microwave_audio_meta["class_name"],
+            "active_from_frame": chime_frame,
+        })
+    return meta
+
 
 def get_all_hdf5_files(directory):
     hdf5_files = []
@@ -409,6 +492,31 @@ def generate_trajectory(args, index, logger):
         os.environ.pop("VLABENCH_HIDDEN_SLOT_LABEL", None)
     env = load_env(args.task_name, robot=args.robot, eval=args.eval_unseen)
     env.reset()
+
+    # ------------------------------------------------------------------
+    # find_hidden scene gates. The cabinets' slide damping is lowered so the
+    # oracle can pull a drawer open, which also means nothing holds a drawer
+    # statically: the hidden object dropping into place during the reset settle
+    # can shove its own drawer out. Force every drawer shut and re-settle, then
+    # verify. A scene that still fails is discarded (the caller retries with a
+    # fresh reset) — writing it out would produce a ~2 s episode that succeeds
+    # before the expert ever moves, and/or an object that is visibly outside its
+    # drawer at the wrong elevation for its slot label.
+    # ------------------------------------------------------------------
+    _is_hidden_family = args.task_name in ("find_hidden_object_open", "find_hidden_object")
+    _gates_on = _is_hidden_family and not args.no_scene_gates
+    if _gates_on:
+        from VLABench.tasks.hierarchical_tasks.primitive.find_hidden_object_open_series import (
+            close_all_drawers, validate_hidden_scene, validate_hidden_episode,
+        )
+        close_all_drawers(env)
+        problems = validate_hidden_scene(env)
+        if problems:
+            logger.warning(f"[gate] rejecting episode {index} at reset: "
+                           + "; ".join(problems))
+            env.close()
+            return
+
     episode_config = env.save()
 
     # load key prior information and task specific variables
@@ -582,6 +690,11 @@ def generate_trajectory(args, index, logger):
     # Binaural audio – set up and start before the skill loop
     # ------------------------------------------------------------------
     _audio_cfg_dict = None
+    # Listener camera for real binaural synthesis. An explicit `cam_id` in the
+    # audio config still wins; the fallback follows the task's mic camera so the
+    # real-audio listener and the oracle GT can never sit on different cameras.
+    from src.audio.oracle_sled import resolve_mic_cam_id as _resolve_mic_cam
+    _fallback_cam_id = _resolve_mic_cam(args.task_name)
     if (_radio_sound_meta is not None or _sounding_sources_meta) and not args.oracle_mode:
         with open(args.audio_config) as _f:
             _base_cfg = json.load(_f)
@@ -608,7 +721,7 @@ def generate_trajectory(args, index, logger):
                 "gain":        1.0,
             })
         _audio_cfg_dict = {
-            "cam_id":   _base_cfg.get("cam_id", 2),
+            "cam_id":   _base_cfg.get("cam_id", _fallback_cam_id),
             "hrtf_path": _base_cfg.get("hrtf_path", ""),
             "tasks": {
                 args.task_name: {"sources": _sources}
@@ -639,7 +752,7 @@ def generate_trajectory(args, index, logger):
         with open(args.audio_config) as _f:
             _base_cfg = json.load(_f)
         _audio_cfg_dict = {
-            "cam_id":   _base_cfg.get("cam_id", 2),
+            "cam_id":   _base_cfg.get("cam_id", _fallback_cam_id),
             "hrtf_path": _base_cfg.get("hrtf_path", ""),
             "tasks": {
                 args.task_name: {
@@ -684,6 +797,39 @@ def generate_trajectory(args, index, logger):
     # label lands ~_record_start_step frames after the robot actually reacts,
     # teaching the policy to move while the cue is still labelled silent.
     _record_start_step = int(getattr(getattr(env, "task", None), "step_count", 0) or 0)
+
+    # ------------------------------------------------------------------
+    # Oracle GT snapshot, taken HERE — at the first recorded frame, before the
+    # expert moves anything.
+    #
+    # It used to be taken after the expert finished, which for find_hidden means
+    # after the drawer had been pulled 4-10 cm out and the hidden object had
+    # ridden out with it. The stored direction therefore described where the
+    # object *ended up*, while eval calls `_oracle_snapshot` fresh on every
+    # policy step and so feeds the policy the object's *current* direction —
+    # starting from the hidden position. Training on the end-of-episode
+    # direction is a train/eval mismatch on exactly the frames where the policy
+    # has to decide which drawer to approach. The sources are static within an
+    # episode for every other task using this path, so taking the snapshot early
+    # is equivalent for them.
+    # ------------------------------------------------------------------
+    _oracle_snapshot_dict = None
+    if args.oracle_mode:
+        _oracle_sources_meta = _build_oracle_sources_meta(
+            _active_radio, _radio_sound_meta, _other_radio, _other_sound_meta,
+            _sounding_sources_meta, _microwave_audio_meta, _record_start_step,
+            logger,
+        )
+        if _oracle_sources_meta:
+            from src.audio.oracle_sled import extract_episode_gt, resolve_mic_cam_id
+            _mic_cam_id = resolve_mic_cam_id(args.task_name)
+            _oracle_snapshot_dict = extract_episode_gt(
+                env, active_sources=_oracle_sources_meta,
+                cam_id=_mic_cam_id, n_frames=1,
+            )
+            logger.info(f"[oracle] GT snapshot at first recorded frame "
+                        f"(mic = camera {_mic_cam_id})")
+
     if n_idle > 0:
         logger.info(f"[idle] holding robot still for {n_idle} frames "
                     f"(~{args.start_idle_seconds:.2f}s @ {args.dataset_fps}fps)")
@@ -715,6 +861,10 @@ def generate_trajectory(args, index, logger):
     audio_arr         = None   # wall-clock audio  → used for SLED inference
     audio_arr_resampled = None # simulation-time audio → saved to WAV/HDF5/video
     _sled_fps         = None   # fps aligned to wall-clock audio (for SLED)
+    # Paths of files written before the episode is known to be keepable; the
+    # SLED gate and the scene gate both delete them on rejection.
+    wav_path           = None
+    dataset_video_path = None
     task_dir  = os.path.join(args.save_dir, args.task_name)
     if audio_mgr is not None:
         audio_mgr.detach_from_env(env)
@@ -893,7 +1043,7 @@ def generate_trajectory(args, index, logger):
 
             # ── Save ground-truth JSON (select_radio only) ───────────────────
             if args.task_name == "select_radio" and _radio_sound_meta is not None:
-                _cam_id = audio_mgr.cam_id if audio_mgr is not None else 2
+                _cam_id = audio_mgr.cam_id if audio_mgr is not None else _fallback_cam_id
                 gt_dir  = task_dir + "_gt"
                 gt_path = _save_gt_json(
                     env, _active_radio, _radio_sound_meta,
@@ -939,8 +1089,38 @@ def generate_trajectory(args, index, logger):
     if not task_success:
         logger.warning("Task failed, skip saving data")
         return
-    else:
-        logger.info("Task success, saving data")
+
+    # ------------------------------------------------------------------
+    # Post-episode gate. The pre-flight check can't catch a drawer that opens
+    # on its own *during* the approach: the condition fires mid-trajectory, the
+    # next env.step returns a terminal timestep, SkillLib.pick bails out with
+    # task_success=True and we end up with a "success" that never grasped a
+    # handle. Those episodes are short and barely move the arm, so gate on both.
+    # ------------------------------------------------------------------
+    if _gates_on:
+        _travel = 0.0
+        if len(waypoints) >= 2:
+            _travel = float(np.linalg.norm(np.asarray(waypoints[-1])[:3]
+                                           - np.asarray(waypoints[0])[:3]))
+        problems = validate_hidden_episode(env, len(observations), _travel)
+        if problems:
+            logger.warning(f"[gate] rejecting episode {index} after rollout: "
+                           + "; ".join(problems))
+            # Remove the artefacts already written before we knew this episode
+            # would be discarded (the dataset video, and the WAV in real-audio
+            # mode). The HDF5 has not been written yet.
+            for _p in (dataset_video_path, wav_path):
+                try:
+                    if _p and os.path.exists(_p):
+                        os.remove(_p)
+                except Exception as _e:
+                    logger.warning(f"  cleanup failed for {_p}: {_e}")
+            env.close()
+            return
+        logger.info(f"[gate] episode {index} passed "
+                    f"({len(observations)} frames, EE travel {_travel:.3f} m)")
+
+    logger.info("Task success, saving data")
 
     # timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data_to_save = process_observations(observations)
@@ -959,57 +1139,29 @@ def generate_trajectory(args, index, logger):
         data_to_save["sled_predictions"] = _sled_json_str
 
     # ------------------------------------------------------------------
-    # Oracle-mode: capture ground-truth audio geometry (no SLED needed)
+    # Oracle-mode: store the ground-truth audio geometry snapshotted at the
+    # first recorded frame (see `_oracle_snapshot_dict` above). Only the frame
+    # count is unknown at snapshot time, so patch it in here.
+    # ------------------------------------------------------------------
+    if _oracle_snapshot_dict is not None:
+        oracle_dict = dict(_oracle_snapshot_dict)
+        oracle_dict["n_frames"] = len(observations)
+        data_to_save["oracle_audio"] = json.dumps(oracle_dict)
+        for _src in oracle_dict["active_sources"]:
+            logger.info(
+                f"[oracle] GT: {_src['name']} (cls {_src['class_id']} "
+                f"{_src['class_name']})  az={_src['az_deg']:+.2f}°  "
+                f"el={_src['el_deg']:+.2f}°  dist={_src['distance_m']:.3f}m"
+                + (f"  active_from_frame={_src['active_from_frame']}"
+                   if "active_from_frame" in _src else "")
+            )
+
+    # ------------------------------------------------------------------
+    # Oracle-mode bookkeeping sidecar (consistent with the non-oracle flow)
     # ------------------------------------------------------------------
     if args.oracle_mode and _active_radio is not None and (
         _radio_sound_meta is not None or _sounding_sources_meta
     ):
-        import sys as _sys
-        _proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if _proj not in _sys.path:
-            _sys.path.insert(0, _proj)
-        from src.audio.oracle_sled import extract_episode_gt
-        _oracle_cam_id = 2   # front cam; static for select_radio
-        # For select_radio/select_radio_two the instruction-targeted radio is
-        # listed first. For select_radio_silent, the target is deliberately
-        # absent from active_sources because it emits no sound.
-        #
-        # NOTE: this target-first order is raw-storage bookkeeping only (it
-        # also drives audio_meta.json / instruction text below) and must NOT
-        # reach the model as-is — it would let a policy learn "always attend
-        # slot 0" instead of matching the instruction's class name.
-        # convert_hdf5_to_lerobot.py re-sorts active_sources by azimuth
-        # (task-left to task-right) before writing observation.audio.* /
-        # audio_slots, so this order never leaks into training data.
-        _active_sources_meta = []
-        if _radio_sound_meta is not None:
-            _active_sources_meta.append({
-                "name":       _active_radio,
-                "class_id":   _radio_sound_meta["class_id"],
-                "class_name": _radio_sound_meta["class_name"],
-            })
-        if _other_sound_meta is not None and _other_radio is not None:
-            _active_sources_meta.append({
-                "name":       _other_radio,
-                "class_id":   _other_sound_meta["class_id"],
-                "class_name": _other_sound_meta["class_name"],
-            })
-        for src in _sounding_sources_meta:
-            sm = src["sound_meta"]
-            _active_sources_meta.append({
-                "name":       src["radio"],
-                "class_id":   sm["class_id"],
-                "class_name": sm["class_name"],
-            })
-        oracle_dict = extract_episode_gt(
-            env,
-            active_sources=_active_sources_meta,
-            cam_id=_oracle_cam_id,
-            n_frames=len(observations),
-        )
-        data_to_save["oracle_audio"] = json.dumps(oracle_dict)
-
-        # Bookkeeping sidecar (consistent with the non-oracle flow)
         if not os.path.exists(task_dir):
             os.makedirs(task_dir)
         meta_path = os.path.join(task_dir, f"audio_meta_{index}.json")
@@ -1049,63 +1201,18 @@ def generate_trajectory(args, index, logger):
             ]
         with open(meta_path, "w") as _mf:
             json.dump(_meta_payload, _mf, indent=2)
-        for _src in oracle_dict["active_sources"]:
-            logger.info(
-                f"[oracle] GT: {_src['name']} (cls {_src['class_id']} "
-                f"{_src['class_name']})  az={_src['az_deg']:+.2f}°  "
-                f"el={_src['el_deg']:+.2f}°  dist={_src['distance_m']:.3f}m"
-            )
 
-    # ------------------------------------------------------------------
-    # Oracle-mode GT for take_out_microwave_food:
-    #   Single time-gated source (the microwave chime). active_from_frame
-    #   = trigger_step so the converter fills frames in [0, trigger_step)
-    #   with silence in this slot and the remainder with the GT class +
-    #   direction. The trainer can then teach the policy to act on the
-    #   silence→active transition.
-    # ------------------------------------------------------------------
-    if args.oracle_mode and _microwave_audio_meta is not None:
-        import sys as _sys
-        _proj = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if _proj not in _sys.path:
-            _sys.path.insert(0, _proj)
-        from src.audio.oracle_sled import extract_episode_gt
-        _oracle_cam_id = 2   # front cam
-        # Convert the chime time from step_count units to recorded-frame units
-        # by subtracting the recording-start offset (see _record_start_step).
-        _chime_frame = max(0, int(_microwave_audio_meta["trigger_step"]) - _record_start_step)
-        logger.info(
-            f"[oracle] chime active_from_frame={_chime_frame} "
-            f"(trigger_step={_microwave_audio_meta['trigger_step']} − "
-            f"record_start_step={_record_start_step})"
-        )
-        _active_sources_meta = [{
-            "name":              _microwave_audio_meta["object_name"],
-            "class_id":          _microwave_audio_meta["class_id"],
-            "class_name":        _microwave_audio_meta["class_name"],
-            "active_from_frame": _chime_frame,
-        }]
-        oracle_dict = extract_episode_gt(
-            env,
-            active_sources=_active_sources_meta,
-            cam_id=_oracle_cam_id,
-            n_frames=len(observations),
-        )
-        data_to_save["oracle_audio"] = json.dumps(oracle_dict)
-        # Sidecar audio_meta_{index}.json is already written by the
-        # _microwave_audio_meta block above (with oracle_mode=True), so we
-        # only log the GT here.
-        for _src in oracle_dict["active_sources"]:
-            logger.info(
-                f"[oracle] GT: {_src['name']} (cls {_src['class_id']} "
-                f"{_src['class_name']})  az={_src['az_deg']:+.2f}°  "
-                f"el={_src['el_deg']:+.2f}°  dist={_src['distance_m']:.3f}m  "
-                f"active_from_frame={_src.get('active_from_frame', 0)}"
-            )
+    # (take_out_microwave_food needs no sidecar here: the _microwave_audio_meta
+    # block earlier already wrote audio_meta_{index}.json with oracle_mode=True,
+    # and its time-gated GT is part of the snapshot above via
+    # `_build_oracle_sources_meta`'s active_from_frame.)
 
+    from VLABench.utils.data_utils import SLIM_DROP_KEYS
     save_single_data(data_to_save,
                      save_dir=task_dir,
                      filename=f"data_{index}.hdf5",
+                     drop_keys=SLIM_DROP_KEYS if args.slim_hdf5 else None,
+                     split_rgb_per_camera=not args.slim_hdf5,
                      )
     env.close()
     
